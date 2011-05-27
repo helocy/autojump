@@ -30,6 +30,7 @@ import getopt
 from sys import argv, stderr, version_info, exit
 from tempfile import NamedTemporaryFile
 from operator import itemgetter
+from copy import copy
 import os
 MAX_KEYWEIGHT = 1000
 MAX_STORED_PATHS = 600
@@ -58,9 +59,9 @@ def save(path_dict, dic_file):
         os.fsync(temp)
         temp.close()
         #cf. http://thunk.org/tytso/blog/2009/03/15/dont-fear-the-fsync/
-        os.rename(temp.name, dic_file) 
+        os.rename(temp.name, dic_file)
         try: #backup file
-            import time 
+            import time
             if (not os.path.exists(dic_file+".bak") or
                     time.time()-os.path.getmtime(dic_file+".bak")>86400):
                 import shutil
@@ -72,14 +73,14 @@ def save(path_dict, dic_file):
 def forget(path_dict, dic_file):
     """Gradually forget about directories. Only call
     from the actual jump since it can take time"""
-    keyweight = sum(path_dict.values()) 
-    if keyweight > MAX_KEYWEIGHT: 
+    keyweight = sum(path_dict.values())
+    if keyweight > MAX_KEYWEIGHT:
         for k in path_dict.keys():
             path_dict[k] *= 0.9 * MAX_KEYWEIGHT / keyweight
         save(path_dict, dic_file)
 
 def clean_dict(sorted_dirs, path_dict):
-    """Limits the sized of the path_dict to MAX_STORED_PATHS. 
+    """Limits the sized of the path_dict to MAX_STORED_PATHS.
     Returns True if keys were deleted"""
     if len(sorted_dirs) > MAX_STORED_PATHS:
         #remove 25 more than needed, to avoid doing it every time
@@ -88,37 +89,62 @@ def clean_dict(sorted_dirs, path_dict):
         return True
     else: return False
 
-def match(path, pattern, ignore_case=False, only_end=False):
-    """Check whether a path matches a particular pattern"""
-    try:
-        if os.path.realpath(os.curdir) == path :
-            return False
-    #Sometimes the current path doesn't exist anymore.
-    #In that case, jump if possible.
-    except OSError:
-        pass
-    if only_end:
-        match_string = "/".join(path.split('/')[-1-pattern.count('/'):])
-    else:
-        match_string = path
-    if ignore_case:
-        does_match = (match_string.lower().find(pattern.lower()) != -1)
-    else:
-        does_match = (match_string.find(pattern) != -1)
-    #return True if there is a match and the path exists 
-    #(useful in the case of external drives, for example)
-    return does_match and os.path.exists(path) 
+def approximatch(pat, text):
+    prev_col = list(range(0, len(pat)+1))
+    col = [0] * (len(pat) + 1)
+    errors = len(pat)
+    for char1 in text:
+        col[0] = 0
+        for i, char2 in enumerate(pat):
+            if char1 == char2:
+                col[i+1] = prev_col[i]
+            else:
+                col[i+1] = 1 + min(col[i], prev_col[i+1], prev_col[i])
+        prev_col = copy(col)
+        errors = min(errors, col[-1])
+    return errors
 
-def find_matches(dirs, patterns, result_list, ignore_case, max_matches):
-    """Find max_matches paths that match the pattern, 
+def find_matches(dirs, patterns, result_list, ignore_case, approx, max_matches):
+    """Find max_matches paths that match the pattern,
     and add them to the result_list"""
-    for path, count in dirs:
-        if len(result_list) >= max_matches :
-            break
+
+    def get_pattern_and_match(patterns, path):
         #For the last pattern, only match the end of the pattern
-        if all(match(path, p, ignore_case,
-            only_end=(n == len(patterns)-1)) for n, p in enumerate(patterns)):
-            uniqadd(result_list, path)
+        for n, pattern in enumerate(patterns):
+            if n == len(patterns) - 1:
+                match_string = "/".join(path.split('/')[-1-pattern.count('/'):])
+            else:
+                match_string = path
+            if ignore_case:
+                pattern = pattern.lower()
+                match_string = match_string.lower()
+            yield (pattern, match_string)
+
+    if approx:
+        one_error_paths = []
+        two_error_paths = []
+        for path, count in dirs:
+            if len(one_error_paths) >= max_matches:
+                break
+            errors = sum(approximatch(pattern, match_string)
+                    for pattern, match_string in get_pattern_and_match(patterns, path))
+            #Verify that the path exists
+            #(useful in the case of external drives, for example)
+            if errors <= 2 and os.path.exists(path):
+                if errors == 1:
+                    uniqadd(one_error_paths, path)
+                elif errors == 2:
+                    uniqadd(two_error_paths, path)
+        result_list.extend(one_error_paths)
+        result_list.extend(two_error_paths[:max_matches-len(one_error_paths)])
+    else:
+        for path, count in dirs:
+            if len(result_list) >= max_matches:
+                break
+            if all(match_string.find(pattern) != -1
+                    for pattern, match_string in
+                    get_pattern_and_match(patterns, path)) and os.path.exists(path):
+                uniqadd(result_list, path)
 
 def open_dic(dic_file, error_recovery=False):
     """Try hard to open the database file, recovering
@@ -145,7 +171,7 @@ def shell_utility():
     """Run this when autojump is called as a shell utility"""
     try:
         optlist, args = getopt.getopt(argv[1:], 'a',
-                ['stat', 'import', 'completion', 'bash']) 
+                ['stat', 'import', 'completion', 'bash'])
     except getopt.GetoptError as ex:
         print("Unknown command line argument: %s" % ex)
         exit(1)
@@ -158,7 +184,7 @@ def shell_utility():
     if ('-a', '') in optlist:
         # The home dir can be reached quickly by "cd"
         # and may interfere with other directories
-        if(args[-1] != os.path.expanduser("~")): 
+        if(args[-1] != os.path.expanduser("~")):
             dicadd(path_dict, args[-1])
             save(path_dict, dic_file)
     elif ('--stat', '') in optlist:
@@ -172,7 +198,7 @@ def shell_utility():
         import re
         completion = False
         #userchoice is i if the pattern is __pattern__i, otherwise -1
-        userchoice = -1 
+        userchoice = -1
         results = []
         if ('--completion', '') in optlist:
             completion = True
@@ -206,12 +232,17 @@ def shell_utility():
                 max_matches = 9
             else:
                 max_matches = 1
-            find_matches(dirs, patterns, results, False, max_matches)
+            find_matches(dirs, patterns, results, False, False, max_matches)
             # If not found, try ignoring case.
             # On completion always show all results
-            if completion or not results: 
+            if completion or not results:
                 find_matches(dirs, patterns, results,
-                        ignore_case=True, max_matches=max_matches) 
+                        ignore_case=True, approx=False, max_matches=max_matches)
+
+            if not results:
+                find_matches(dirs, patterns, results,
+                        ignore_case=True, approx=True, max_matches=max_matches)
+
             # Keep the database to a reasonable size
             if not completion and clean_dict(dirs, path_dict):
                 save(path_dict, dic_file)
@@ -220,7 +251,7 @@ def shell_utility():
             else: quotes = ""
 
             if userchoice != -1:
-                if len(results) > userchoice-1 : 
+                if len(results) > userchoice-1 :
                     print(quotes+results[userchoice-1]+quotes)
             elif len(results) > 1 and completion:
                 print("\n".join(("%s%s%d%s%s" % (patterns[-1],
