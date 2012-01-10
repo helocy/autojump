@@ -175,7 +175,47 @@ def match(path, pattern, match_string):
         eaten_path = path
     return (does_match, eaten_path)
 
-def find_matches(dirs, patterns, result_list, ignore_case, max_matches, current_dir):
+def approximatch(pat, text, max_errors):
+    """Calculate the Damerau-Levenshtein distance between :pat and :text,
+    minimized over all possible positions of :pat within :text. As an
+    optimization, this distance is only accurate if it is <= :max_errors.
+    Return values greater than :max_errors indicate that the distance is _at
+    least_ that much. Runs in O(:max_errors * len(:text)) time."""
+    cols = [list(range(0, len(pat)+1))]
+    errors = len(pat)
+    for i in range(0, len(text)): cols.append([errors] * (len(pat) + 1))
+    last_active = min(max_errors, len(pat))
+    last_seen_in_text = {}
+    for i, char1 in enumerate(text):
+        cols[i+1][0] = 0
+        last_seen_in_pat = 0
+        for j, char2 in enumerate(pat):
+            i1 = last_seen_in_text[char2] if char2 in last_seen_in_text else 0
+            j1 = last_seen_in_pat
+            if char1 == char2:
+                cols[i+1][j+1] = cols[i][j]
+                last_seen_in_pat = j + 1
+            else:
+                cols[i+1][j+1] = 1 + min(cols[i+1][j], cols[i][j+1], cols[i][j])
+            if i1 and j1:
+                cols[i+1][j+1] = min(cols[i+1][j+1], 1 + (i - i1) + (j - j1) + cols[i1-1][j1-1])
+
+            #Ukkonen's cut-off heuristic. See 'Theoretical and Empirical
+            #Comparisons of Approximate String Matching Algorithms by Chang and
+            #Lampe for details.
+            if j + 1 == len(pat):
+                errors = min(errors, cols[i+1][j+1])
+            elif j + 1 == last_active + 1:
+                break
+
+        last_seen_in_text[char1] = i + 1
+
+        if last_active < len(pat): last_active += 1
+        while cols[i+1][last_active] > max_errors: last_active -= 1
+
+    return errors
+
+def find_matches(dirs, patterns, result_list, ignore_case, approx, max_matches, current_dir):
     """Find max_matches paths that match the pattern,
     and add them to the result_list"""
 
@@ -203,19 +243,47 @@ def find_matches(dirs, patterns, result_list, ignore_case, max_matches, current_
 
     N = len(patterns)
 
-    # standard matching
-    for path in dir_paths(dirs, current_dir):
-        does_match, eaten_path = True, path
-        for idx, p in enumerate(patterns):
-            p, m = make_pattern_match(eaten_path, p, ignore_case, idx, N)
-            does_match, eaten_path = match(eaten_path, p, m)
-            if not does_match: break
-        #If a path doesn't exist, don't jump there
-        #We still keep it in db in case it's from a removable drive
-        if does_match and os.path.exists(path):
-            uniqadd(result_list, path)
-            if len(result_list) >= max_matches:
-                break
+    if not approx:
+        # standard matching
+        for path in dir_paths(dirs, current_dir):
+            does_match, eaten_path = True, path
+            for idx, p in enumerate(patterns):
+                p, m = make_pattern_match(eaten_path, p, ignore_case, idx, N)
+                does_match, eaten_path = match(eaten_path, p, m)
+                if not does_match: break
+            if not does_match:
+                continue
+            #If a path doesn't exist, don't jump there
+            #We still keep it in db in case it's from a removable drive
+            if os.path.exists(path):
+                uniqadd(result_list, path)
+                if len(result_list) >= max_matches:
+                    break
+    else:
+        # approximate matching by Damerau-Levenshtein edit distance
+        # collect
+        approx_paths = dict.fromkeys([1,2], []) # keyed on number of errors
+        for path in dir_paths(dirs, current_dir):
+            bad_match, total_errors = False, 0
+            for idx, p in enumerate(patterns):
+                p, m = make_pattern_match(path, p, ignore_case, idx, N)
+                edit_dist = approximatch(p, m, 2)
+                # if the number of errors are >= than the string length, then a
+                # match is always possible, so this result is useless
+                if edit_dist >= len(p) or edit_dist >= len(m):
+                    bad_match = True
+                    break
+                total_errors += edit_dist
+            if bad_match or total_errors > 2:
+                continue
+            #If a path doesn't exist, don't jump there
+            #We still keep it in db in case it's from a removable drive
+            if os.path.exists(path):
+                uniqadd(approx_paths[total_errors], path)
+                if len(approx_paths[1]) >= max_matches:
+                    break
+        result_list.extend(approx_paths[1])
+        result_list.extend(approx_paths[2][:max_matches - len(approx_paths[1])])
 
 def get_dic_file(filename="autojump.txt"):
     if CONFIG_DIR == os.path.expanduser("~"):
@@ -299,13 +367,25 @@ def shell_utility():
             #In that case, jump if possible.
             except OSError:
                 current_dir = None
-            find_matches(dirs, patterns, results, False, max_matches, current_dir)
+
+            # find exact matches
+            find_matches(dirs, patterns, results,
+                    ignore_case=False, approx=False,
+                    max_matches=max_matches, current_dir=current_dir)
+
             # If not found, try ignoring case.
             # On completion always show all results
             if completion or not results:
                 find_matches(dirs, patterns, results,
-                        ignore_case=True,
+                        ignore_case=True, approx=False,
                         max_matches=max_matches, current_dir=current_dir)
+
+            # if still not found, try approximate matching
+            if not results:
+                find_matches(dirs, patterns, results,
+                        ignore_case=True, approx=True,
+                        max_matches=max_matches, current_dir=current_dir)
+
             # Keep the database to a reasonable size
             if not completion and clean_dict(dirs, path_dict):
                 save(path_dict, dic_file)
