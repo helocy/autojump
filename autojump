@@ -231,7 +231,7 @@ def find_matches(dirs, patterns, result_list, ignore_case, approx, max_matches, 
     def make_pattern_match(path, pattern, ignore_case, idx, N):
         """Make pattern and match string, handling last pattern and case"""
         # for the last pattern, only match the end of the pattern
-        if idx == N:
+        if idx == N-1:
             match_str = "/".join(path.split('/')[-1-pattern.count('/'):])
         else:
             match_str = path
