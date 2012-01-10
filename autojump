@@ -93,7 +93,7 @@ def save(path_dict, dic_file):
         # using rename to overwrite files
         shutil.move(temp.name, dic_file)
         try: #backup file
-            import time 
+            import time
             if (not os.path.exists(dic_file+".bak") or
                     time.time()-os.path.getmtime(dic_file+".bak")>86400):
                 shutil.copy(dic_file, dic_file+".bak")
@@ -147,14 +147,14 @@ def open_dic(dic_file, error_recovery=False):
 def forget(path_dict, dic_file):
     """Gradually forget about directories. Only call
     from the actual jump since it can take time"""
-    keyweight = sum(path_dict.values()) 
-    if keyweight > MAX_KEYWEIGHT: 
+    keyweight = sum(path_dict.values())
+    if keyweight > MAX_KEYWEIGHT:
         for k in path_dict.keys():
             path_dict[k] *= 0.9 * MAX_KEYWEIGHT / keyweight
         save(path_dict, dic_file)
 
 def clean_dict(sorted_dirs, path_dict):
-    """Limits the sized of the path_dict to MAX_STORED_PATHS. 
+    """Limits the sized of the path_dict to MAX_STORED_PATHS.
     Returns True if keys were deleted"""
     if len(sorted_dirs) > MAX_STORED_PATHS:
         #remove 25 more than needed, to avoid doing it every time
@@ -214,7 +214,7 @@ def find_matches(dirs, patterns, result_list, ignore_case, max_matches, current_
         #We still keep it in db in case it's from a removable drive
         if does_match and os.path.exists(path):
             uniqadd(result_list, path)
-            if len(result_list) >= max_matches :
+            if len(result_list) >= max_matches:
                 break
 
 def get_dic_file(filename="autojump.txt"):
@@ -238,7 +238,7 @@ def shell_utility():
     if ('-a', '') in optlist:
         # The home dir can be reached quickly by "cd"
         # and may interfere with other directories
-        if(args[-1] != os.path.expanduser("~")): 
+        if(args[-1] != os.path.expanduser("~")):
             dicadd(path_dict, decode(args[-1]))
             save(path_dict, dic_file)
     elif ('--stat', '') in optlist:
@@ -257,7 +257,7 @@ def shell_utility():
         import re
         completion = False
         #userchoice is i if the pattern is __pattern__i, otherwise -1
-        userchoice = -1 
+        userchoice = -1
         results = []
         if ('--completion', '') in optlist:
             completion = True
@@ -302,10 +302,10 @@ def shell_utility():
             find_matches(dirs, patterns, results, False, max_matches, current_dir)
             # If not found, try ignoring case.
             # On completion always show all results
-            if completion or not results: 
+            if completion or not results:
                 find_matches(dirs, patterns, results,
                         ignore_case=True,
-                        max_matches=max_matches, current_dir=current_dir) 
+                        max_matches=max_matches, current_dir=current_dir)
             # Keep the database to a reasonable size
             if not completion and clean_dict(dirs, path_dict):
                 save(path_dict, dic_file)
@@ -314,7 +314,7 @@ def shell_utility():
             else: quotes = ""
 
             if userchoice != -1:
-                if len(results) > userchoice-1 : 
+                if len(results) > userchoice-1:
                     output(unico("%s%s%s") % (quotes,results[userchoice-1],quotes))
             elif len(results) > 1 and completion:
                 output("\n".join(("%s%s%d%s%s" % (patterns[-1],
