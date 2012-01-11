@@ -25,6 +25,7 @@ import getopt
 from sys import argv, stderr, version_info, exit, getfilesystemencoding
 from tempfile import NamedTemporaryFile
 from operator import itemgetter
+from collections import defaultdict
 import os
 import shutil
 
@@ -38,11 +39,6 @@ if "AUTOJUMP_DATA_DIR" in os.environ:
 else:
     xdg_data_dir = os.environ.get('XDG_DATA_HOME') or os.path.join(os.environ['HOME'], '.local', 'share')
     CONFIG_DIR=os.path.join(xdg_data_dir, 'autojump')
-
-def uniqadd(collection, key):
-    """Adds a key to a list only if it is not already present"""
-    if key not in collection:
-        collection.append(key)
 
 def dicadd(dic, key, increment=1):
     """Increment a value in a dic, set it to 0
@@ -163,9 +159,9 @@ def clean_dict(sorted_dirs, path_dict):
         return True
     else: return False
 
-def match(pattern, text, path):
+def match(pattern, text, path, rank):
     """Check whether a path matches a particular pattern, and return
-       the remaining part of the string"""
+       a (match flag, remaining part of the pattern, and match rank) tuple"""
     find_idx = text.find(pattern)
     does_match = (find_idx != -1)
     # Eat the path to avoid two patterns matching the same part of the string
@@ -173,14 +169,16 @@ def match(pattern, text, path):
         eaten_path = path[find_idx+len(pattern):]
     else:
         eaten_path = path
-    return (does_match, eaten_path)
+    return (does_match, eaten_path, rank) # exact match has rank 0
 
-def approximatch(pattern, text, path, max_errors = 2):
-    """Calculate the Damerau-Levenshtein distance between :pattern and :text,
+def approximatch(pattern, text, path, rank, max_errors = 2):
+    """Determine and evaluate the best approximate match:
+    1. Calculate the Damerau-Levenshtein distance between :pattern and :text,
     minimized over all possible positions of :pattern within :text. As an
     optimization, this distance is only accurate if it is <= :max_errors.
     Return values greater than :max_errors indicate that the distance is _at
-    least_ that much. Runs in O(:max_errors * len(:text)) time."""
+    least_ that much. Runs in O(:max_errors * len(:text)) time.
+    2. Evaluate the suitability of the approximate match's edit distance"""
     cols = [list(range(0, len(pattern)+1))]
     errors = len(pattern)
     for i in range(0, len(text)): cols.append([errors] * (len(pattern) + 1))
@@ -213,20 +211,21 @@ def approximatch(pattern, text, path, max_errors = 2):
         if last_active < len(pattern): last_active += 1
         while cols[i+1][last_active] > max_errors: last_active -= 1
 
-    return errors
+    # evaluate the best approximate match
+    does_match = True
+    rank += errors
+    # if the number of errors is >= the max error tolerance,
+    # the match is too distant and the result is discarded.
+    # if the number of errors is >= than the string length, then a
+    # match is always possible, so this result is useless.
+    if rank > max_errors or errors >= len(pattern) or errors >= len(text):
+        does_match = False
+    return (does_match, path, errors)
 
-def find_matches(dirs, patterns, result_list, ignore_case, approx, max_matches, current_dir):
-    """Find max_matches paths that match the pattern,
-    and add them to the result_list"""
-
-    def dir_paths(dirs, current_dir):
-        """Generate dir paths, excluding current dir"""
-        for path, count in dirs:
-            # don't jump to where we already are
-            if current_dir == path:
-              continue
-
-            yield path
+def find_matches(dirs, patterns, max_matches, current_dir):
+    """Find as many paths up to max_matches that match the pattern,
+    ranked in the following match precision order:
+    exact -> case insensitive -> approximate (up to edit distance of 2)"""
 
     def make_pattern_match(path, pattern, ignore_case, idx, N):
         """Make pattern and match string, handling last pattern and case"""
@@ -241,49 +240,52 @@ def find_matches(dirs, patterns, result_list, ignore_case, approx, max_matches, 
             match_str = match_str.lower()
         return (pattern, match_str)
 
-    N = len(patterns)
+    # necessary rank to accept search results early (= edit distance of 1)
+    ACCEPT_RANK = 1
 
-    if not approx:
-        # standard matching
-        for path in dir_paths(dirs, current_dir):
-            does_match, eaten_path = True, path
-            for idx, p in enumerate(patterns):
-                p, m = make_pattern_match(eaten_path, p, ignore_case, idx, N)
-                does_match, eaten_path = match(p, m, eaten_path)
-                if not does_match: break
-            if not does_match:
+    # extract paths, excluding current dir so we don't jump to where we are
+    dirs = [path for path, count in dirs if path != current_dir]
+
+    # collect paths in rank order, where an exact match = 0 and
+    # approximate matches = edit distance (number of errors)
+    matches, ranked_matches, match_count = set(), defaultdict(list), 0
+    match_strategies = [(match, False), (match, True), (approximatch, True)]
+    N = len(patterns)
+    for match_func, ignore_case in match_strategies:
+        for path in dirs:
+            # avoid already-matched paths
+            if path in matches:
                 continue
-            #If a path doesn't exist, don't jump there
-            #We still keep it in db in case it's from a removable drive
-            if os.path.exists(path):
-                uniqadd(result_list, path)
-                if len(result_list) >= max_matches:
-                    break
-    else:
-        # approximate matching by Damerau-Levenshtein edit distance
-        # collect
-        approx_paths = dict.fromkeys([1,2], []) # keyed on number of errors
-        for path in dir_paths(dirs, current_dir):
-            bad_match, total_errors = False, 0
+            # match the patterns
+            does_match, match_path, rank = True, path, 0
             for idx, p in enumerate(patterns):
-                p, m = make_pattern_match(path, p, ignore_case, idx, N)
-                edit_dist = approximatch(p, m, path)
-                # if the number of errors are >= than the string length, then a
-                # match is always possible, so this result is useless
-                if edit_dist >= len(p) or edit_dist >= len(m):
-                    bad_match = True
+                p, m = make_pattern_match(match_path, p, ignore_case, idx, N)
+                does_match, match_path, rank = match_func(p, m, match_path, rank)
+                if not does_match:
                     break
-                total_errors += edit_dist
-            if bad_match or total_errors > 2:
-                continue
-            #If a path doesn't exist, don't jump there
-            #We still keep it in db in case it's from a removable drive
-            if os.path.exists(path):
-                uniqadd(approx_paths[total_errors], path)
-                if len(approx_paths[1]) >= max_matches:
-                    break
-        result_list.extend(approx_paths[1])
-        result_list.extend(approx_paths[2][:max_matches - len(approx_paths[1])])
+            # filter out bad matches and don't jump to nonexistent paths
+            # (we still it in the db in case it's from a removable drive)
+            if does_match and os.path.exists(path):
+                matches.add(path)
+                ranked_matches[rank].append(path)
+                # keep searching until a sufficient number of acceptable
+                # matches is found
+                if rank <= ACCEPT_RANK:
+                    match_count += 1
+                    if match_count == max_matches:
+                        break
+        # only fall back to next level of flexibility
+        # if there are not any high-ranking results
+        if ranked_matches[0]:
+                break
+
+    # fill in results up to max matches, best-first
+    results = []
+    for rank in ranked_matches:
+        results.extend(ranked_matches[rank][:max_matches - len(results)])
+        if len(results) == max_matches:
+            break
+    return results
 
 def get_dic_file(filename="autojump.txt"):
     if CONFIG_DIR == os.path.expanduser("~"):
@@ -368,23 +370,8 @@ def shell_utility():
             except OSError:
                 current_dir = None
 
-            # find exact matches
-            find_matches(dirs, patterns, results,
-                    ignore_case=False, approx=False,
-                    max_matches=max_matches, current_dir=current_dir)
-
-            # If not found, try ignoring case.
-            # On completion always show all results
-            if completion or not results:
-                find_matches(dirs, patterns, results,
-                        ignore_case=True, approx=False,
-                        max_matches=max_matches, current_dir=current_dir)
-
-            # if still not found, try approximate matching
-            if not results:
-                find_matches(dirs, patterns, results,
-                        ignore_case=True, approx=True,
-                        max_matches=max_matches, current_dir=current_dir)
+            # find matches in exact -> case-insensitive -> approximate order
+            results = find_matches(dirs, patterns, max_matches, current_dir)
 
             # Keep the database to a reasonable size
             if not completion and clean_dict(dirs, path_dict):
